@@ -1,4 +1,4 @@
-# fusion-opt
+# Meta Bayesian Optimization with Human Feedback
 
 <h1> Introduction </h1>
 Bayesian Optimization (BO) has proven effective in optimizing costly black-box
@@ -7,8 +7,7 @@ Recent advancements have proposed human-AI collaborative approaches to
 enhance the trustworthiness of BO, integrating human expertise into the optimization process. 
 However, current methods primarily focus on single-task scenarios,
 which start the optimization process from scratch when tackling a new function,
-neglecting the opportunity to leverage knowledge from related functions. In this
-paper, we propose to tackle this issue by leveraging Meta-Learning and introducing
+neglecting the opportunity to leverage knowledge from related functions. We propose to tackle this issue by leveraging Meta-Learning and introducing
 Meta Bayesian Optimization with Human Feedback (MBO-HF), an explainable
 human-in-the-loop framework for Meta Bayesian Optimization (Meta-BO). MBO-HF
 utilizes a Transformer Neural Process (TNP) to construct an adaptable surrogate
