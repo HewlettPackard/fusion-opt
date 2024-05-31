@@ -234,11 +234,9 @@ max_num_points = 1000 #
 samplig = False
 if dataset == 'svm':
     samplig = True
-#seeds = [0,1,4,5,6,7,8,10,13,16,17,18,19,20,22,23,0,1,4,5,6,7,8,10,13]    
-#seeds = [0,0,1,1,5]
+
 mean_seeds = []
 for j in range(number_of_tries):
-#seeds = [0,1,3,4,5,6,8,10,11,13,16,17,18,19,21,22,24,13,16,17,18,19,21,22,24]
 #for j in seeds:
     print("SEED: ", j)
     torch.random.manual_seed(j)
