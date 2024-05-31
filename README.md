@@ -1,4 +1,4 @@
-# Meta Bayesian Optimization with Human Feedback
+# fusion-opt
 
 <h1> Introduction </h1>
 Bayesian Optimization (BO) has proven effective in optimizing costly black-box
