@@ -29,6 +29,8 @@ $ conda create -n mbohf python=3.9
 $ conda activate mbohf
 $ pip install -r requirements.txt
 ```
+## Documentation and Installation
+Refer to the [docs](https://hewlettpackard.github.io/fusion-opt/) for documentation of the Fusion-opt.
 
 ## Usage
 
