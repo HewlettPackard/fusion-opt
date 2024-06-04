@@ -29,8 +29,9 @@ Main contributions of fusion-opt:
 
 
 .. toctree::
-   :maxdepth: 2
-   :caption: Contents:
+   :hidden:
+   installation
+  
 
 
 
