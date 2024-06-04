@@ -3,7 +3,7 @@ References
 ========================================
 
 .. bibliography::
-   references.bib 
+
 
 
 
