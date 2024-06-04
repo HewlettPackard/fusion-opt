@@ -15,13 +15,13 @@ Example Test Cases
 Training
 --------
 .. code-block:: bash
-    python  chosen_test_case
+   python  chosen_test_case
 
 
 Evaluating
 ----------
 .. code-block:: bash
-    python  synthetic_meta_ptest.py
+   python  synthetic_meta_ptest.py
 
 
 
