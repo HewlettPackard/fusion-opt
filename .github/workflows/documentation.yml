@@ -19,9 +19,4 @@ jobs:
           sphinx-build sphinx docs
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        with:
-          publish_branch: docs
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: root
-          force_orphan: true
+
