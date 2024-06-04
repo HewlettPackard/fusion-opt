@@ -21,7 +21,7 @@ Main contributions of fusion-opt:
 - Explainability, the framework explains each of the candidate points so that human in the loop can make better decsion for selecting the next point
 
 .. image:: images/explainability.png
-   :scale: 30 %
+   :scale: 100 %
    :alt: Explainable BO
    :align: center
 
