@@ -30,6 +30,7 @@ Main contributions of fusion-opt:
 
 .. toctree::
    :hidden:
+
    installation
   
 
