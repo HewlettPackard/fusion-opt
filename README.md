@@ -5,6 +5,9 @@ Bayesian Optimization (BO) has proven effective in optimizing costly black-box f
 However, current methods primarily focus on single-task scenarios, which start the optimization process from scratch when tackling a new function, neglecting the opportunity to leverage knowledge from related functions. We propose to tackle this issue by leveraging Meta-Learning and introducing Meta Bayesian Optimization with Human Feedback (MBO-HF), an explainable human-in-the-loop framework for Meta Bayesian Optimization (Meta-BO). MBO-HF utilizes a Transformer Neural Process (TNP) to construct an adaptable surrogate model. This surrogate model, coupled with MBO-HF’s novel acquisition function (AF), suggests candidate points to human users. Additionally, MBO-HF integratesH an explainable framework, leveraging Shapley values to provide explanations about the candidates, helping human users make informed decisions regarding the next best point to evaluate. We demonstrate that MBO-HF surpasses the state-of-the-art on human-AI collaborative BO in experiments on five different hyperparameter
 optimization benchmarks and a real-world task of battery design. MBO-HF can also be used for optimizations used for Inertial Confinement Fusion.
 
+## Documentation and Installation
+Refer to the [docs](https://hewlettpackard.github.io/fusion-opt/) for documentation of the Fusion-opt.
+
 <h1>Quick Start Guide</h1>
 <h2>Prerequisites</h2>
 Python3.9
@@ -29,8 +32,7 @@ $ conda create -n mbohf python=3.9
 $ conda activate mbohf
 $ pip install -r requirements.txt
 ```
-## Documentation and Installation
-Refer to the [docs](https://hewlettpackard.github.io/fusion-opt/) for documentation of the Fusion-opt.
+
 
 ## Usage
 
