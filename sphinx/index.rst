@@ -20,6 +20,12 @@ Main contributions of fusion-opt:
 - Modular design, i.e users can utilize pre-defined modules for preference models, or build their own
 - Explainability, the framework explains each of the candidate points so that human in the loop can make better decsion for selecting the next point
 
+.. image:: images/components.png
+   :scale: 100 %
+   :alt: Components
+   :align: center
+
+
 .. image:: images/explainability.png
    :scale: 100 %
    :alt: Explainable BO
