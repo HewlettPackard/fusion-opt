@@ -37,7 +37,7 @@ extensions = [
 ]
 
 # source for bib references
-bibtex_bibfiles = ['references.bib']
+bibtex_bibfiles = ['refs.bib']
 
 # citation style
 bibtex_default_style = 'plain'
