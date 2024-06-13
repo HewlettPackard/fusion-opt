@@ -1,7 +1,7 @@
 import torch
 import torch.distributions as D
 from ._prior import Uniform
-from ._utils import TensorManager
+from ._utils import TensorManager, convert_to_pair
 
 
 class DuelFeedback(TensorManager):
@@ -9,7 +9,9 @@ class DuelFeedback(TensorManager):
         self, 
         prior_init, 
         true_function,
+        n_suggestions=2,
         noisy=False,
+        
     ):
         """
         Class for duel feedback.
@@ -20,7 +22,8 @@ class DuelFeedback(TensorManager):
         - noisy: bool, whether or not the feedback contains noisy observations
         """
         super().__init__()
-        self.prior_duel = Uniform(prior_init.bounds.repeat(1,2))
+        self.n_suggestions = n_suggestions
+        self.prior_duel = Uniform(prior_init.bounds.repeat(1,n_suggestions))
         self.true_function = true_function
         self.noisy = noisy
 
@@ -31,15 +34,67 @@ class DuelFeedback(TensorManager):
         Args:
         - dataset_obj: list, list of the observed samples for objective function.
         """
-        
         if self.noisy:
-            self.Y_var = dataset_obj[2].var() 
+            self.Y_var = dataset_obj[2].var()
         else:
             self.Y_var = dataset_obj[1].var()
-        if torch.isnan(self.Y_var).any():
-            self.Y_var = 0.00001
-        self.Y_var = max(self.Y_var, 0.00001)
-    def feedback(self, X_pairwise, sigma=0, in_loop=True):
+            
+            
+    def n_feedback(self, X_n_wise, sigma=0, in_loop=True):
+        num_initial_points = len(X_n_wise)
+        dim = X_n_wise.shape[1] // self.n_suggestions
+        
+        
+        chunks = torch.chunk(X_n_wise, dim=1, chunks=self.n_suggestions)
+        noises = []
+        y_vals = []
+        for chunk_id in range(self.n_suggestions):
+            chunk = chunks[chunk_id]    
+            if not sigma == 0:
+                noises.append(D.Normal(0, sigma*self.Y_var).sample(torch.Size([len(chunk)])))
+            else:
+                noises.append(self.zeros(len(chunk)))
+                
+            y = None
+            if self.noisy:
+                _, y = self.true_function(chunk.squeeze())
+            else:
+                y = self.true_function(chunk.squeeze())
+            y_vals.append(y)
+            
+        
+        X_pairwise = torch.tensor([], dtype=X_n_wise.dtype,  device=X_n_wise.device)    
+        y_pairwise = torch.tensor([], dtype=torch.int8,  device=X_n_wise.device)
+        y_pairwise_unsure = torch.tensor([], dtype=torch.int8,  device=X_n_wise.device)
+        for i in range(self.n_suggestions):
+            for j in range(i + 1, self.n_suggestions):
+                
+                curr_X_pairwise = torch.cat((chunks[i],chunks[j]),dim=1)
+                X_pairwise = torch.cat((X_pairwise,curr_X_pairwise))
+                
+                y = y_vals[i] 
+                noise = noises[i]
+                
+                y_prime = y_vals[j] 
+                noise_prime =  noises[j]
+                
+                currnt_y_pairwise = (y + noise > y_prime + noise_prime).long()
+                thresh = sigma * self.Y_var
+                bool_unsure = ((y - y_prime).abs().pow(2) <= thresh)
+                currnt_y_pairwise_unsure = bool_unsure.long()
+                if in_loop:
+                    currnt_y_pairwise[bool_unsure] = 1
+
+                y_pairwise = torch.cat((y_pairwise, currnt_y_pairwise))
+                y_pairwise_unsure = torch.cat((y_pairwise_unsure, currnt_y_pairwise_unsure))
+                
+                    
+
+        return X_pairwise, y_pairwise, y_pairwise_unsure
+        
+
+    
+    def feedback(self, X_n_wise, sigma=0, in_loop=True):
         """
         Synthetic human feedback function.
         
@@ -52,14 +107,15 @@ class DuelFeedback(TensorManager):
         - y_pairwise: torch.tensor, the observed preference result (sure)
         - y_pairwise_unsure: torch.tensor, the observed preference result (unsure)
         """
-
-        u, u_prime = torch.chunk(X_pairwise, dim=1, chunks=2)     
+        X_pairwise = convert_to_pair(X_n_wise, self.n_suggestions) #Sahand
+        X_pairwise = X_pairwise[:self.n_suggestions-1]
+        u, u_prime = torch.chunk(X_pairwise, dim=1, chunks=2)
         if not sigma == 0:
-            noise = D.Normal(0, sigma*self.Y_var).sample(torch.Size([len(u)])).cuda()
-            noise_prime = D.Normal(0, sigma*self.Y_var).sample(torch.Size([len(u)])).cuda()
+            noise = D.Normal(0, sigma*self.Y_var).sample(torch.Size([len(u)]))
+            noise_prime = D.Normal(0, sigma*self.Y_var).sample(torch.Size([len(u)]))
         else:
-            noise = self.zeros(len(u)).cuda()
-            noise_prime = self.zeros(len(u_prime)).cuda()
+            noise = self.zeros(len(u))
+            noise_prime = self.zeros(len(u_prime))
         
         if self.noisy:
             _, y = self.true_function(u.squeeze())
@@ -67,17 +123,15 @@ class DuelFeedback(TensorManager):
         else:
             y = self.true_function(u.squeeze())
             y_prime = self.true_function(u_prime.squeeze())
-        y = y.cuda()
-        y_prime = y_prime.cuda()
-
-
+        
         y_pairwise = (y + noise > y_prime + noise_prime).long()
         thresh = sigma * self.Y_var
         bool_unsure = ((y - y_prime).abs().pow(2) <= thresh)
         y_pairwise_unsure = bool_unsure.long()
         if in_loop:
-            y_pairwise[bool_unsure] = 1
-        return y_pairwise, y_pairwise_unsure   # y_pairwise 1 means preference model
+            y_pairwise[bool_unsure] = 1  # Sahand check if this is correct for the case of in_loop with more n_suggestions > 2
+
+        return y_pairwise, y_pairwise_unsure
 
     def augmented_feedback(self, X_pairwise, sigma=0, in_loop=True):
         """
@@ -97,7 +151,7 @@ class DuelFeedback(TensorManager):
         - y_pairwise: torch.tensor, the augmented preference result (sure)
         - y_pairwise_unsure: torch.tensor, the augmented preference result (unsure)
         """
-        y_pairwise, y_pairwise_unsure = self.feedback(X_pairwise, sigma=sigma, in_loop=in_loop)
+        X_pairwise, y_pairwise, y_pairwise_unsure = self.n_feedback(X_pairwise, sigma=sigma, in_loop=in_loop)
         X_pairwise, y_pairwise, y_pairwise_unsure = self.data_augment(X_pairwise, y_pairwise, y_pairwise_unsure)
         return X_pairwise, y_pairwise, y_pairwise_unsure
 
@@ -115,7 +169,7 @@ class DuelFeedback(TensorManager):
         index = torch.cat([torch.arange(dim,2*dim), torch.arange(dim)])
         return X_pairwise[:,index]
 
-    def data_augment(self, X_pairwise, y_pairwise, y_pairwise_unsure):
+    def data_augment(self, X_n_wise, y_pairwise, y_pairwise_unsure):
         """
         Skew-symmetric data augmentation operation.
         
@@ -129,6 +183,8 @@ class DuelFeedback(TensorManager):
         - y_pairwise: torch.tensor, the augmented preference result (sure)
         - y_pairwise_unsure: torch.tensor, the augmented preference result (unsure)
         """
+        X_pairwise = convert_to_pair(X_n_wise, self.n_suggestions)
+        X_pairwise = X_pairwise[:self.n_suggestions-1]
         X_pairwise_swap = self.swap_columns(X_pairwise)
         X_cat = torch.vstack([X_pairwise, X_pairwise_swap])
         y_pairwise_swap = abs(y_pairwise_unsure - y_pairwise)
@@ -186,9 +242,9 @@ class DuelFeedback(TensorManager):
         X_pairwise, y_pairwise, y_pairwise_unsure = dataset_duel
         X_pairwise_new, y_pairwise_new, y_pairwise_unsure_new = dataset_duel_new
         X_pairwise_new, y_pairwise_new, y_pairwise_unsure_new = self.data_augment(X_pairwise_new, y_pairwise_new, y_pairwise_unsure_new)
-        X_cat = torch.vstack([X_pairwise.cpu(), X_pairwise_new.cpu()])
-        y_cat = torch.cat([y_pairwise.cpu(), y_pairwise_new.cpu()], dim=0)
-        y_unsure = torch.cat([y_pairwise_unsure.cpu(), y_pairwise_unsure_new.cpu()], dim=0)
+        X_cat = torch.vstack([X_pairwise, X_pairwise_new])
+        y_cat = torch.cat([y_pairwise, y_pairwise_new], dim=0)
+        y_unsure = torch.cat([y_pairwise_unsure, y_pairwise_unsure_new], dim=0)
         dataset_duel_updated = (X_cat, y_cat, y_unsure)
         return dataset_duel_updated
     
@@ -205,6 +261,6 @@ class DuelFeedback(TensorManager):
         """
         y_true, _ = self.feedback(X_pairwise, sigma=0)
         n_total = len(y_pairwise)
-        n_wrong = (y_pairwise - y_true.cpu()).abs().sum().item()
+        n_wrong = (y_pairwise - y_true).abs().sum().item()
         n_correct = (n_total - n_wrong)
         return n_correct / n_total

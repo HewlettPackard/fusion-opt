@@ -1,22 +1,20 @@
 import ast
 import torch
-import shap
 import pandas as pd
-import matplotlib.pyplot as plt
 import numpy as np
-import seaborn as sns
+import matplotlib.pyplot as plt
 from GPSHAP.explanation_algorithms.GPSHAP import GPSHAP
 from GPSHAP.utils.visualisation.deterministic_values import summary_plot
 from GPSHAP.utils.visualisation.stochastic_values import local_explanation_plot, global_explanation_plot
 from GPSHAP.acquisition_functions.ucb import GPUCBSHAP
 from GPSHAP.gp_models.ExactGPRegression import ExactGPRegression
 from gpytorch.kernels import ScaleKernel, RBFKernel
-from ._utils import TensorManager, generate_meshgrid
+from ._utils import TensorManager
 from ._gp_regressor import predict
 
 
 class HumanFeedback(TensorManager):
-    def __init__(self, feature_names):
+    def __init__(self, feature_names, n_suggestions):
         """
         A class for communicating with a human user.
         
@@ -25,6 +23,11 @@ class HumanFeedback(TensorManager):
         """
         TensorManager.__init__(self)
         self.feature_names = feature_names
+        self.n_suggestions = n_suggestions
+        
+        
+
+
         
     def display_pairwise_samples(self, X_pairwise_next, random=False):
         """
@@ -41,6 +44,64 @@ class HumanFeedback(TensorManager):
         else:
             print("X0 (preference): " + str(X0.squeeze().float()))
             print("X1 (normal UCB): " + str(X1.squeeze().float()))
+            
+    def display_n_samples(self, X_n_wise, random=False):
+        
+        chunks = torch.chunk(X_n_wise, dim=1, chunks=self.n_suggestions)
+        for chunk_id in range(self.n_suggestions):
+            chunk = chunks[chunk_id]
+            if random:
+                print("Option{0}. X{1} (random): {2}".format(chunk_id+1, chunk_id, chunk.squeeze().float()))
+            else:
+                source = "preference" if chunk_id == 0 else "normal AF chosen(s)"
+                print("Option{0}. X{1} ({2}): {3}".format(chunk_id+1, chunk_id, source, chunk.squeeze().float()))
+            
+    def get_human_feedback_n(self, rand=False):
+        """
+        Get the human feedback from the interface
+        
+        Args:
+        - random: bool, whether or not the pairwise candidate is randomly generated.
+        
+        Return:
+        - y_pairwise_next: torch.tensor, human selection results.
+        - y_pairwise_unsure_next: torch.tensor, 1 if unsure, otherwise 0.
+        """
+        
+        print("Please choose your preferred option:")
+        for i in range(self.n_suggestions):
+            print("{0}. Option {1}".format(i+1,i+1))
+        print("{0}. Uncertain".format(self.n_suggestions+1))
+            
+         
+        human_feedback =  int(input("Enter your choice(1-{0}): ".format(self.n_suggestions+1)))
+        if human_feedback in np.arange(1,self.n_suggestions+2):
+            if human_feedback == 1 :
+                feedback_sure = 0
+                feedback_unsure = 1 
+            else : 
+                feedback_sure = 1
+                feedback_unsure = 1
+            if human_feedback != self.n_suggestions+1:
+                print("You chose X{0}".format(human_feedback-1))
+            else :   # not sure
+                if rand:
+                    feedback_sure = int(torch.distributions.Bernoulli(0.5).sample(torch.Size([1])).item())
+                else:
+                    feedback_sure = 1
+                feedback_unsure = 0
+                print("You are unsure. We follow BO recommendation.")
+        else:
+            raise ValueError("You can select only 0 or 1 or 2")
+        
+        return  feedback_sure, feedback_unsure, human_feedback
+        
+
+                
+                
+                
+
+
         
     def get_human_feedback(self, rand=False):
         """
@@ -106,7 +167,7 @@ class HumanFeedback(TensorManager):
         gpucbshap = GPUCBSHAP(
             gpshap=gpshap,
             beta_reg=1.96,
-        )
+        )#Sahand has to be checked
         return gpucbshap
     
     def shapley_explanation(self, X_suggest, Xall, Yall, model, beta):
@@ -120,31 +181,25 @@ class HumanFeedback(TensorManager):
         - model: botorch.models.gp_regression.SingleTaskGP, BoTorch SingleTaskGP.
         - beta: float, optimization hyperparameter of GP-UCB, UCB := mu(x) + beta * stddev(x)
         """
-        # # 1. learn Shapley values
-        # gpucbshap = self.GPSHAP_UCB(model, Xall, Yall, beta)
-        # gpucbshap.fit_ucbshap(X_suggest.float(), num_coalitions=2**Xall.shape[-1])
-        # ucb_shapley = gpucbshap.ucb_explanations
-        # mean_shapley = gpucbshap.mean_svs
-        # std_shapley = gpucbshap.std_svs
-        print("X_suggest")
-        mean_shapley, std_shapley = self.get_shap_values(model, X_suggest)
-        # 2. visualise
+        # 1. learn Shapley values
+        gpucbshap = self.GPSHAP_UCB(model, Xall, Yall, beta)  ##Sahand has to be checked
+        gpucbshap.fit_ucbshap(X_suggest.float(), num_coalitions=2**Xall.shape[-1])
+        ucb_shapley = gpucbshap.ucb_explanations
+        mean_shapley = gpucbshap.mean_svs
+        std_shapley = gpucbshap.std_svs
 
-        data_ids = ["X1", "X2"]
-        if self.feature_names is None:
-            feature_names = ["SUM"] + ["ft" + str(i) for i in range(Xall.shape[-1])]
+        # 2. visualise
+        data_ids = ["X{0}".format(i) for i in range(self.n_suggestions)]
+        if self.feature_names == None:
+            feature_names = ["SUM"] + ["dim"+str(i) for i in range(Xall.shape[-1])]
         else:
             feature_names = ["SUM"] + self.feature_names
-        print("feature_names: ", feature_names)
         
-        fig, axes = plt.subplots(2, 3, figsize=(8, 6), gridspec_kw={'wspace': 0.4, 'hspace': 0.4}, sharex=True)
-        
-        sns.set_palette("muted")
-        colors = sns.color_palette("Set2")
+        fig, axes = plt.subplots(self.n_suggestions, 3, figsize=(6, 4), gridspec_kw={'wspace': 0.6}, sharex=True)
 
         for i, id in enumerate(data_ids):
             df_mean = pd.DataFrame(
-                torch.hstack([mean_shapley.sum(axis=1).reshape([2,1]), mean_shapley]), 
+                torch.vstack([ucb_shapley.sum(axis=0), ucb_shapley]).T, 
                 index=data_ids,
                 columns=feature_names,
             )
@@ -152,31 +207,33 @@ class HumanFeedback(TensorManager):
                 kind="barh", 
                 rot=0, 
                 stacked=True, 
-                ax=axes[i, 0], 
+                ax = axes[i, 0], 
                 legend=False,
-                color=colors,
+                color=["k","b","b","b"],
             ).invert_yaxis()
             axes[i, 0].axvline(x=0, color="k", linewidth=1)
             axes[i, 0].axhline(y=0.5, color="k", linestyle="--", linewidth=1)
             axes[i, 0].set_ylabel(id)
-            axes[i, 0].set_title("AF")
 
+            df_mean = pd.DataFrame(
+                torch.vstack([mean_shapley.sum(axis=0), mean_shapley]).T, 
+                index=data_ids, 
+                columns=feature_names,
+            )
             df_mean.iloc[i,:].plot(
                 kind="barh", 
                 rot=0, 
                 stacked=True, 
-                ax=axes[i, 1], 
+                ax = axes[i, 1], 
                 yticks=[], 
                 ylabel='',
-                legend=False,
-                color=colors,
+                color=["k","b","b","b"],
             ).invert_yaxis()
             axes[i, 1].axvline(x=0, color="k", linewidth=1)
             axes[i, 1].axhline(y=0.5, color="k", linestyle="--", linewidth=1)
-            axes[i, 1].set_title("TNP Mean")
 
             df_std = pd.DataFrame(
-                torch.hstack([std_shapley.sum(axis=1).reshape([2,1]), std_shapley]), 
+                torch.vstack([std_shapley.sum(axis=0), std_shapley]).T, 
                 index=data_ids, 
                 columns=feature_names,
             )
@@ -184,36 +241,18 @@ class HumanFeedback(TensorManager):
                 kind="barh", 
                 rot=0, 
                 stacked=True, 
-                ax=axes[i, 2], 
+                ax = axes[i, 2], 
                 yticks=[], 
                 ylabel='',
-                legend=False,
-                color=colors,
+                color=["k","b","b","b"],
             ).invert_yaxis()
             axes[i, 2].axvline(x=0, color="k", linewidth=1)
             axes[i, 2].axhline(y=0.5, color="k", linestyle="--", linewidth=1)
-            axes[i, 2].set_title("TNP Std Dev")
 
-        handles, labels = axes[0, 0].get_legend_handles_labels()
-        #fig.legend(handles, feature_names, loc='upper center', ncol=4)
-        plt.suptitle("SHAP Explanation", fontsize=16)
-        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        axes[0, 0].set_title("UCB")
+        axes[0, 1].set_title("GP mean")
+        axes[0, 2].set_title("GP stddev")
         plt.show()
-
-    def get_shap_values(self, model, X_set):
-        x_samples = model.samples_x
-        model.xc = model.train_X.unsqueeze(0).cuda()
-        model.yc = model.train_targets.reshape([1,len(model.train_targets),1]).cuda()
-        means = []
-        stds = []
-        for X in X_set:
-            explainer = shap.KernelExplainer(model.predict_mean, x_samples.detach().cpu().numpy())
-            mean = explainer.shap_values(X.detach().cpu().numpy())
-            explainer = shap.KernelExplainer(model.predict_std, x_samples.detach().cpu().numpy())
-            std = explainer.shap_values(X.detach().cpu().numpy())
-            means.append(mean)
-            stds.append(std)
-        return torch.tensor(means), torch.tensor(stds)
 
     def pointwise_explanation(self, X_suggest, model, beta):
         """
@@ -226,11 +265,15 @@ class HumanFeedback(TensorManager):
         """
         # 1. Compute values
         with torch.no_grad():
-            mean, std = self.obtain_mean_std(model, X_suggest)
-        ucb = mean + beta * std
+            predictive_dist = model.likelihood(model(X_suggest))
+        mean = predictive_dist.loc
+        std = predictive_dist.variance.sqrt()
+        ucb = mean + beta * std   #Sahand needs to be replaced with calling proper acquisition function
 
         # 2. visualise
-        data_ids = ["X0", "X1"]
+        # X_suggest self.n_suggestions
+        # data_ids = ["X0", "X1"]
+        data_ids = ["X{0}".format(i) for i in range(self.n_suggestions)]
         fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(9, 4), gridspec_kw={'wspace': 0.2})
         ax1.barh(data_ids, ucb, alpha=.5, color="blue")
         ax1.invert_yaxis()
@@ -247,20 +290,7 @@ class HumanFeedback(TensorManager):
         #_ = ax3.legend(bbox_to_anchor=(1.0, 1.02), loc='upper left')
         plt.plot()
         plt.show()
-
-    def obtain_mean_std(self, model, X):
-        context_x = model.train_X
-        context_y = model.train_targets
-        X_shape = context_x.shape
-        context_x_ = context_x.reshape([1,X_shape[0],X_shape[1]])
-        context_y_ = context_y.reshape([1,len(context_y),1])
-        distribution = model.predict(context_x_.float().cuda(),context_y_.float().cuda(),X.reshape([1,len(X),X_shape[1]]).cuda()) #.reshape([1,len(mesh_grid),X_shape[1]])
- 
-        likelihood_gp_mean = torch.squeeze(distribution.mean.detach().cpu()[0])
         
-        likelihood_gp_std = torch.squeeze(distribution.scale.detach().cpu()[0]) 
-        return likelihood_gp_mean, likelihood_gp_std
-
     def visualisation_flow(self, X_suggest, Xall, Yall, model, prior_pref, beta, pref=False):
         """
         The flow for the spatial visualisation.
@@ -274,25 +304,25 @@ class HumanFeedback(TensorManager):
         - beta: float, optimization hyperparameter of GP-UCB, UCB := mu(x) + beta * stddev(x)
         - pref: bool, visualise the preference augmented model if true, otherwise the normal GP model.
         """
-        # print("Do you want to specify the dimension by yourself (y)?")
-        # self_exp = input('Type y if yes, otherwise type n as no')
-        # if self_exp == "y":
-        wish_repeat = "y"
-        while wish_repeat == "y":
-            vis = HumanVisualisation(Xall, Yall, X_suggest)
+        print("Do you want to specify the dimension by yourself (y)? Otherwise, we estimate based on Shapley value (n)")
+        self_exp = input('Type y if yes, otherwise type n as no')
+        if self_exp == "y":
+            wish_repeat = "y"
+            while wish_repeat == "y":
+                vis = HumanVisualisation(Xall, Yall, X_suggest)
+                if pref:
+                    vis.plot_pref(prior_pref)
+                else:
+                    vis.plot_gp(model)
+                print("Do you want to visualise again?")
+                wish_repeat = input('Type y if yes, otherwise type n as no')
+        else:
+            vis = ShapleyVisualisation(Xall, Yall, X_suggest)
+            vis.set_plotting_range(X_suggest, model, beta)
             if pref:
                 vis.plot_pref(prior_pref)
             else:
                 vis.plot_gp(model)
-            print("Do you want to visualise again?")
-            wish_repeat = input('Type y if yes, otherwise type n as no')
-        # else:
-        #     vis = ShapleyVisualisation(Xall, Yall, X_suggest)
-        #     vis.set_plotting_range(X_suggest, model, beta)
-        #     if pref:
-        #         vis.plot_pref(prior_pref)
-        #     else:
-        #         vis.plot_gp(model)
         
     def explanation_flow(self, X_suggest, Xall, Yall, model, prior_pref, beta):
         """
@@ -306,7 +336,7 @@ class HumanFeedback(TensorManager):
         - prior_pref: CoExBO._monte_carlo_quadrature.MonteCarloQuadrature, soft-Copleland score function (human preference).
         - beta: float, optimization hyperparameter of GP-UCB, UCB := mu(x) + beta * stddev(x)
         """
-        print("Do you need more explanation on the two candidates?")
+        print("Do you need more explanation on the the candidates?")
         value_exp = input('Type y if yes, otherwise type n as no')
         if value_exp == "y":
             self.pointwise_explanation(X_suggest, model, beta)
@@ -314,7 +344,6 @@ class HumanFeedback(TensorManager):
         print("Do you want to know the attribution to each feature?")
         shapley_exp = input('Type y if yes, otherwise type n as no')
         if shapley_exp == "y":
-            print("YES SHAPLEY")
             self.shapley_explanation(X_suggest, Xall, Yall, model, beta)
             
         print("Do you want to visualise the GP on the plane where two candidates are placed?")
@@ -344,7 +373,13 @@ class ShapleyVisualisation(TensorManager):
         self.n_dims = len(self.X_best)
         self.X = X
         self.Y = Y
-        self.X_pref, self.X_bo = torch.chunk(X_pairwise_next.view(1,-1), dim=1, chunks=2)
+        # self.X_pref, self.X_bo = torch.chunk(X_pairwise_next.view(1,-1), dim=1, chunks=2)
+        
+        self.n_suggestion = len(X_pairwise_next)
+        chunks = torch.chunk(X_pairwise_next.view(1,-1), dim=1, chunks=self.n_suggestion)
+        self.X_pref, self.X_bo = chunks[0],  chunks[1:]
+
+        
         self.resolution = resolution
         
     def GPSHAP_UCB(self, model, beta):
@@ -389,20 +424,22 @@ class ShapleyVisualisation(TensorManager):
         - beta: float, optimization hyperparameter of GP-UCB, UCB := mu(x) + beta * stddev(x)
         """
         # compute Shapley values
-        # gpucbshap = self.GPSHAP_UCB(model, beta)
-        # gpucbshap.fit_ucbshap(X_pairwise_next.float(), num_coalitions=2**self.X.shape[-1])
-        # ucb_shapley = gpucbshap.ucb_explanations
+        gpucbshap = self.GPSHAP_UCB(model, beta)
+        gpucbshap.fit_ucbshap(X_pairwise_next.float(), num_coalitions=2**self.X.shape[-1])
+        ucb_shapley = gpucbshap.ucb_explanations
         
         # compute dims and bounds
-        #self.dims = ucb_shapley.mean(axis=0).sort(descending=True).indices[:2]
-        self.dims = model.train_X.shape[1]
+        self.dims = ucb_shapley.mean(axis=0).sort(descending=True).indices[:2]
         # Xall = torch.vstack([self.X_best[self.dims], self.X_bo[0,self.dims], self.X_pref[0,self.dims]])
-        # mins = Xall.min(axis=0).values
-        # maxs = Xall.max(axis=0).values
-        # deltas = maxs - mins
-        # ub = deltas + maxs
-        # lb = mins - deltas
-        self.bounds = torch.vstack([torch.tensor(model.lower_limit), torch.tensor(model.upper_limit)])
+        X_bo_t=torch.vstack(self.X_bo)
+        X_bos= [X_bo_t[i][self.dims] for i in range(self.n_suggestion-1)]
+        Xall = torch.vstack([self.X_best[self.dims],*X_bos, self.X_pref[0,self.dims]])
+        mins = Xall.min(axis=0).values
+        maxs = Xall.max(axis=0).values
+        deltas = maxs - mins
+        ub = deltas + maxs
+        lb = mins - deltas
+        self.bounds = torch.vstack([lb, ub])
         self.x_grid = self.generate_grid()
     
     def set_subtract(self, A, B):
@@ -430,7 +467,7 @@ class ShapleyVisualisation(TensorManager):
         """
         vector = self.bounds[0] + (self.bounds[1] - self.bounds[0]) * self.standardise_tensor(
             torch.linspace(0, 1, self.resolution).repeat(2,1).T
-        ).cpu()
+        )
         v1, v2 = torch.chunk(vector, dim=1, chunks=2)
         x_grid = torch.vstack([
             torch.hstack([v1, v.repeat(self.resolution,1)])
@@ -439,7 +476,8 @@ class ShapleyVisualisation(TensorManager):
         if self.n_dims > 2:
             dim_rest = self.set_subtract(torch.arange(self.n_dims), self.dims)
             dim_order = torch.cat([self.dims, dim_rest])
-            X_rest = torch.vstack([self.X_pref, self.X_bo, self.X_best]).mean(axis=0)[dim_rest]
+            # X_rest = torch.vstack([self.X_pref, self.X_bo, self.X_best]).mean(axis=0)[dim_rest]
+            X_rest = torch.vstack([self.X_pref,*self.X_bo, self.X_best]).mean(axis=0)[dim_rest]
             x_grid = torch.hstack([x_grid, X_rest.repeat(len(x_grid), 1)])[:,dim_order]
         return x_grid
     
@@ -490,14 +528,23 @@ class ShapleyVisualisation(TensorManager):
         """
         print("best observed, white dot o:" + str(self.X_best))
         print("X0 (preference), black star *:" + str(self.X_pref.squeeze()))
-        print("X1 (normal UCB), green cross +:" + str(self.X_bo.squeeze()))
+        for i in range(self.n_suggestion-1):
+            print("X{0} (normal AF(s)), green cross +:{1}".format(i+1 ,self.X_bo[i].squeeze()))
+        # print("X1 (normal UCB), green cross +:" + str(self.X_bo.squeeze()))
         print("observed points, yellow cross x")
 
         fig, (ax1, ax2) = plt.subplots(1,2,figsize=(6,6), tight_layout=True)
         res = (self.sqrt(len(mean)) -1).long()
         self.plot_function(mean, ax1)
         ax1.scatter(self.X_best[self.dims[0]], self.X_best[self.dims[1]], color="white", marker="o", s=50)
-        ax1.scatter(self.X_bo[0, self.dims[0]], self.X_bo[0, self.dims[1]], color="green", marker="+", s=50)
+        # ax1.scatter(self.X_bo[0, self.dims[0]], self.X_bo[0, self.dims[1]], color="green", marker="+", s=50)
+        X_bo_t=torch.vstack(self.X_bo)
+        X_bos= [X_bo_t[i][self.dims] for i in range(self.n_suggestion-1)]
+        for i in range(self.n_suggestion-1):
+            X_bo = X_bos[i]
+            ax1.scatter(X_bo[0], X_bo[1], color="green", marker="+", s=50)
+        
+        
         ax1.scatter(self.X_pref[0, self.dims[0]], self.X_pref[0, self.dims[1]], color="black", marker="*", s=50)
         X_inbound, flag = self.get_inbound()
         if flag:
@@ -509,7 +556,10 @@ class ShapleyVisualisation(TensorManager):
 
         self.plot_function(var, ax2)
         ax2.scatter(self.X_best[self.dims[0]], self.X_best[self.dims[1]], color="white", marker="o", s=50)
-        ax2.scatter(self.X_bo[0, self.dims[0]], self.X_bo[0, self.dims[1]], color="green", marker="+", s=50)
+        # ax2.scatter(self.X_bo[0, self.dims[0]], self.X_bo[0, self.dims[1]], color="green", marker="+", s=50)
+        for i in range(self.n_suggestion-1):
+            X_bo =  X_bos[i]
+            ax2.scatter(X_bo[0], X_bo[1], color="green", marker="+", s=50)
         ax2.scatter(self.X_pref[0, self.dims[0]], self.X_pref[0, self.dims[1]], color="black", marker="*", s=50)
         if flag:
             ax2.scatter(X_inbound[:, self.dims[0]], X_inbound[:, self.dims[1]], color="yellow", marker="x", s=10)
@@ -526,20 +576,8 @@ class ShapleyVisualisation(TensorManager):
         - model: botorch.models.gp_regression.SingleTaskGP, BoTorch SingleTaskGP.
         """
         pred = predict(self.x_grid, model)
-        y_mean, y_var = self.obtain_mean_std(model, self.x_grid.float())
+        y_mean, y_var = pred.loc, pred.variance
         self.plot_mean_and_variance(y_mean, y_var, "GP mean", "GP variance")
-    
-    def obtain_mean_std(self, model, X):
-        context_x = model.train_X
-        context_y = model.train_targets
-        X_shape = context_x.shape
-        context_x_ = context_x.reshape([1,X_shape[0],X_shape[1]])
-        context_y_ = context_y.reshape([1,len(context_y),1])
-        distribution = model.predict(context_x_.float().cuda(),context_y_.float().cuda(),X.reshape([1,len(X),X_shape[1]]).cuda()) #.reshape([1,len(mesh_grid),X_shape[1]])
- 
-        likelihood_gp_mean = torch.squeeze(distribution.mean.detach().cpu()[0])
-        likelihood_gp_std = torch.squeeze(distribution.scale.detach().cpu()[0]) 
-        return likelihood_gp_mean, likelihood_gp_std
         
     def plot_pref(self, prior_pref):
         """
@@ -566,9 +604,17 @@ class HumanVisualisation(TensorManager):
         TensorManager.__init__(self)
         self.X_best = X[Y.argmax()]
         self.n_dims = len(self.X_best)
-        self.X = X.cpu()
+        self.X = X
         self.Y = Y
-        self.X_pref, self.X_bo = torch.chunk(X_pairwise_next.view(1,-1), dim=1, chunks=2)
+        
+        # self.X_pref, self.X_bo = torch.chunk(X_pairwise_next.view(1,-1), dim=1, chunks=2)
+        
+        self.n_suggestion = len(X_pairwise_next)
+        # self.Suggested_X = [X_pairwise_next[i] for i in range(self.n_suggestion)] 
+        # self.X_pref = self.Suggested_X[0]
+        chunks = torch.chunk(X_pairwise_next.view(1,-1), dim=1, chunks=self.n_suggestion)
+        self.X_pref, self.X_bo = chunks[0],  chunks[1:]
+        
         self.resolution = resolution
         self.dims, self.bounds = self.ask_details()
         self.x_grid = self.generate_grid() 
@@ -584,10 +630,9 @@ class HumanVisualisation(TensorManager):
         dims = input('Type two dimensions you wish to see, like [0,1]')
         lb = input('Type lower bounds of each dimension you wish to see, like [-1,-1]')
         ub = input('Type upper bounds of each dimension you wish to see, like [1,1]')
-        print("dims: ", dims)
-        dims = self.tensor(ast.literal_eval(dims)).long().cpu()
-        lb = self.tensor(ast.literal_eval(lb)).cpu()
-        ub = self.tensor(ast.literal_eval(ub)).cpu()
+        dims = self.tensor(ast.literal_eval(dims)).long()
+        lb = self.tensor(ast.literal_eval(lb))
+        ub = self.tensor(ast.literal_eval(ub))
         bounds = torch.vstack([lb, ub])
         return dims, bounds
     
@@ -605,7 +650,7 @@ class HumanVisualisation(TensorManager):
         # assume A > B in the size
         mask = self.ones(A.shape).bool()
         mask[B] = 0
-        return torch.masked_select(A, mask.cpu())
+        return torch.masked_select(A, mask)
     
     def generate_grid(self):
         """
@@ -616,7 +661,7 @@ class HumanVisualisation(TensorManager):
         """
         vector = self.bounds[0] + (self.bounds[1] - self.bounds[0]) * self.standardise_tensor(
             torch.linspace(0, 1, self.resolution).repeat(2,1).T
-        ).cpu()
+        )
         v1, v2 = torch.chunk(vector, dim=1, chunks=2)
         x_grid = torch.vstack([
             torch.hstack([v1, v.repeat(self.resolution,1)])
@@ -624,9 +669,11 @@ class HumanVisualisation(TensorManager):
         ])
         if self.n_dims > 2:
             dim_rest = self.set_subtract(torch.arange(self.n_dims), self.dims)
-            dim_order = torch.cat([self.dims.cpu(), dim_rest.cpu()])
-            X_rest = torch.vstack([self.X_pref, self.X_bo, self.X_best]).mean(axis=0)[dim_rest]
-            x_grid = torch.hstack([x_grid.cpu(), X_rest.repeat(len(x_grid), 1)])[:,dim_order]
+            dim_order = torch.cat([self.dims, dim_rest])
+            # X_rest = torch.vstack([self.X_pref, self.X_bo, self.X_best]).mean(axis=0)[dim_rest]
+            # x_grid = torch.hstack([x_grid, X_rest.repeat(len(x_grid), 1)])[:,dim_order]
+            X_rest = torch.vstack([*self.X_bo, self.X_best]).mean(axis=0)[dim_rest]
+            x_grid = torch.hstack([x_grid, X_rest.repeat(len(x_grid), 1)])[:,dim_order]
         return x_grid
     
     def plot_function(self, data, ax):
@@ -637,7 +684,6 @@ class HumanVisualisation(TensorManager):
         - data: 2D data
         - ax: matplotlib.pyplot.axes, axis to visualise
         """
-        data.cpu().numpy()
         data = self.numpy(data).reshape(self.resolution, self.resolution)
         image = ax.imshow(
             data,
@@ -677,14 +723,21 @@ class HumanVisualisation(TensorManager):
         """
         print("best observed, white dot o:" + str(self.X_best))
         print("X0 (preference), black star *:" + str(self.X_pref.squeeze()))
-        print("X1 (normal UCB), green cross +:" + str(self.X_bo.squeeze()))
+        for i in range(self.n_suggestion-1):
+            print("X{0} (normal AF(s)), green cross +:{1}".format(i+1 ,self.X_bo[i].squeeze()))
         print("observed points, yellow cross x")
 
-        fig, (ax1, ax2) = plt.subplots(1,2,figsize=(6,6), tight_layout=True)
+        fig, axes  = plt.subplots(1,2,figsize=(6,6), tight_layout=True)
         res = (self.sqrt(len(mean)) -1).long()
         self.plot_function(mean, ax1)
         ax1.scatter(self.X_best[self.dims[0]], self.X_best[self.dims[1]], color="white", marker="o", s=50)
-        ax1.scatter(self.X_bo[0, self.dims[0]], self.X_bo[0, self.dims[1]], color="green", marker="+", s=50)
+        
+        X_bo_t=torch.vstack(self.X_bo)
+        X_bos= [X_bo_t[i][self.dims] for i in range(self.n_suggestion-1)]
+        
+        for i in range(self.n_suggestion-1):
+            X_bo = X_bos[i]
+            ax1.scatter(X_bo[0], X_bo[1], color="green", marker="+", s=50)
         ax1.scatter(self.X_pref[0, self.dims[0]], self.X_pref[0, self.dims[1]], color="black", marker="*", s=50)
         X_inbound, flag = self.get_inbound()
         if flag:
@@ -696,7 +749,9 @@ class HumanVisualisation(TensorManager):
 
         self.plot_function(var, ax2)
         ax2.scatter(self.X_best[self.dims[0]], self.X_best[self.dims[1]], color="white", marker="o", s=50)
-        ax2.scatter(self.X_bo[0, self.dims[0]], self.X_bo[0, self.dims[1]], color="green", marker="+", s=50)
+        for i in range(self.n_suggestion-1):
+            X_bo = X_bos[i]
+            ax2.scatter(X_bo[0], X_bo[1], color="green", marker="+", s=50)
         ax2.scatter(self.X_pref[0, self.dims[0]], self.X_pref[0, self.dims[1]], color="black", marker="*", s=50)
         if flag:
             ax2.scatter(X_inbound[:, self.dims[0]], X_inbound[:, self.dims[1]], color="yellow", marker="x", s=10)
@@ -712,22 +767,10 @@ class HumanVisualisation(TensorManager):
         Args:
         - model: botorch.models.gp_regression.SingleTaskGP, BoTorch SingleTaskGP.
         """
-        #y_mean, y_var = predict(self.x_grid, model)
-        y_mean, y_var = self.obtain_mean_std(model, self.x_grid.float())
+        pred_mvn = predict(self.x_grid, model)
+        y_mean = pred_mvn.loc  
+        y_var = pred_mvn.variance
         self.plot_mean_and_variance(y_mean, y_var, "GP mean", "GP variance")
-    
-    def obtain_mean_std(self, model, X):
-        context_x = model.train_X
-        context_y = model.train_targets
-        X_shape = context_x.shape
-        context_x_ = context_x.reshape([1,X_shape[0],X_shape[1]])
-        context_y_ = context_y.reshape([1,len(context_y),1])
-        distribution = model.predict(context_x_.float().cuda(),context_y_.float().cuda(),X.reshape([1,len(X),X_shape[1]]).cuda()) #.reshape([1,len(mesh_grid),X_shape[1]])
- 
-        likelihood_gp_mean = torch.squeeze(distribution.mean.detach().cpu()[0])
-        
-        likelihood_gp_std = torch.squeeze(distribution.scale.detach().cpu()[0]) 
-        return likelihood_gp_mean, likelihood_gp_std
         
     def plot_pref(self, prior_pref):
         """

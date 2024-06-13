@@ -105,7 +105,7 @@ class MonteCarloQuadrature(TensorManager):
         - Y_mean: torch.tensor, the unnormalised mean of soft Copeland score
         - Y_std: torch.tensor, the unnormalised standard deviation of soft Copeland score
         """
-        X = self.check_input(X).cuda()
+        X = self.check_input(X)
         if len(X) <= self.thresh:
             Y_mean, Y_std = self.soft_copeland_score(X)
         else:

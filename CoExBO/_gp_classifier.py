@@ -62,7 +62,7 @@ def set_gp_classifier(X_pairwise, y_pairwise):
         likelihood,
         num_classes=likelihood.num_classes,
         base_kernel=RFFKernel,
-    ).cuda()
+    )
     return model
     
 def train_by_sgd(model, training_iter=10):
@@ -84,7 +84,7 @@ def train_by_sgd(model, training_iter=10):
     for i in range(training_iter):
         optimizer.zero_grad()
         output = model(train_x)
-        loss = -mll(output, model.likelihood.transformed_targets.cuda()).sum()
+        loss = -mll(output, model.likelihood.transformed_targets).sum()
         loss.backward()
         optimizer.step()
     return model

@@ -4,10 +4,21 @@ from torch.quasirandom import SobolEngine
 from torch.distributions.multivariate_normal import MultivariateNormal
 
 
+def convert_to_pair(X_n_wise, n_suggestions):
+    
+    num_initial_points = len(X_n_wise)
+    dim = X_n_wise.shape[1] // n_suggestions
+    chunks = torch.chunk(X_n_wise, dim=1, chunks=n_suggestions)
+    X_pairwise = torch.tensor([], dtype=X_n_wise.dtype,  device=X_n_wise.device)  
+    for i in range(n_suggestions):
+        for j in range(i + 1, n_suggestions):
+            
+            curr_X_pairwise = torch.cat((chunks[i],chunks[j]),dim=1)
+            X_pairwise = torch.cat((X_pairwise,curr_X_pairwise))
+    return X_pairwise
 class TensorManager:
     def __init__(self):
         self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-        #self.device = torch.device('cpu')
         self.dtype = torch.double
         
     def standardise_tensor(self, tensor):
@@ -184,13 +195,3 @@ class Utils(SafeTensorOperator):
         super().__init__()
 
     
-def generate_meshgrid(lb, ub, dim = 2, num_points = 40, step = 0.025):
-    
-    tensors = []
-    for _ in range(dim):
-        tensor = torch.linspace(lb, ub, num_points)
-        tensors.append(tensor)
-    
-    # Stack the tensors along the second dimension to create a 2D tensor
-    tensor_combined = torch.stack(tensors, dim=1)
-    return tensor_combined

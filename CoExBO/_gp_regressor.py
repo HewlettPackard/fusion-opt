@@ -24,15 +24,15 @@ def set_rbf_model(X, Y):
     covar_module = ScaleKernel(base_kernel)
 
     # Fit a GP model
-    y_std = 1 if Y.std() == 0 or torch.isnan(Y.std()).any() else Y.std()
-    train_Y = (Y - Y.mean()) / y_std
+    train_Y = (Y - Y.mean()) / Y.std()
     train_Y = train_Y.view(-1).unsqueeze(1)
     likelihood = GaussianLikelihood()
     model = SingleTaskGP(X, train_Y, likelihood=likelihood, covar_module=covar_module)
-    if tm.is_cuda():
-        return model.cuda()
-    else:
-        return model
+    return model
+    # if tm.is_cuda():
+    #     return model.cuda()
+    # else:
+    #     return model
 
 def optimise_model(model):
     """

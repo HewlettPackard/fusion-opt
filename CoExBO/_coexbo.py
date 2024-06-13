@@ -1,7 +1,7 @@
 import time
 import torch
 import torch.distributions as D
-from ._utils import TensorManager
+from ._utils import TensorManager, convert_to_pair
 from ._duel import DuelFeedback
 from ._gp_regressor import set_and_fit_rbf_model
 from ._gp_classifier import set_and_train_classifier, gp_sample
@@ -10,9 +10,82 @@ from ._dueling_acquisition_function import DuelingAcquisitionFunction, PiBODueli
 from ._human_interface import HumanFeedback
 from botorch.models.pairwise_gp import PairwiseGP, PairwiseLaplaceMarginalLogLikelihood
 from botorch.fit import fit_gpytorch_model
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score
+from xgboost import XGBClassifier
+import xgboost as xgb
 import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.utils.class_weight import compute_class_weight
+from scipy.special import expit 
+from typing import Tuple
+
+
+
+
+def custom_objective_logistic(predt: np.ndarray,
+                dtrain: xgb.DMatrix) -> Tuple[np.ndarray, np.ndarray]:
+  
+    y_true = dtrain.get_label()
+
+    # Compute the predicted probabilities (using scipy.special.expit for stability)
+    y_pred_proba = expit(predt)  # Consider alternative clipping if SciPy not available
+
+    # Compute the logistic loss
+    loss = np.sum(np.log(1 + np.exp(-y_true * predt)))
+
+    # Compute the gradient
+    grad = predt - y_true
+
+    # Compute the Hessians
+    hess = y_pred_proba * (1 - y_pred_proba)
+
+    return loss, grad, hess    
+
+def custom_objective_NIL(predt: np.ndarray,
+                dtrain: xgb.DMatrix) -> Tuple[np.ndarray, np.ndarray]:
+
+    y_true = dtrain.get_label()
+
+    # Clip predictions for stability (optional)
+    predt = np.clip(predt, 1e-8, 1 - 1e-8)  # Avoid log(0) errors
+
+    # Compute Negative Log-Likelihood loss
+    loss = -np.sum(y_true * np.log(predt) + (1 - y_true) * np.log(1 - predt))
+
+    # Compute the gradient
+    grad = predt - y_true
+
+    # Compute the Hessians
+    hess = predt * (1 - predt)  # Hessian for NLL loss
+
+    return  grad, hess
+
+
+def xgboost_pref_model(X_pairwise, y_pairwise):
+
+            
+
+    # Convert data and labels to NumPy arrays for XGBoost
+    features = X_pairwise.numpy()
+    labels = y_pairwise.numpy()
+    # Create DMatrices for XGBoost
+    dtrain = xgb.DMatrix(data=X_pairwise, label=y_pairwise)
+    params = {'tree_method': 'hist',  'max_depth' : 10, 'early_stopping_rounds': 5, 'learning_rate': 0.1 }
+    xgboost_model = xgb.train(
+        params ,
+        dtrain=dtrain,
+        # Use custom loss function
+        obj=   custom_objective_NIL, 
+        num_boost_round=7, 
+        
+        # Other training parameters (e.g., num_boost_round, learning_rate)
+    )
+
+
+
+    
+    return xgboost_model
+
 
 class CoExBO(HumanFeedback):
     def __init__(
@@ -30,7 +103,8 @@ class CoExBO(HumanFeedback):
         probabilistic_pi=True,
         hallucinate=True,
         adversarial=False,
-        meta=False
+        n_suggestions=2,
+        chosen_acf=["qMES"],  
     ):
         """
         CoExBO main instance.
@@ -50,11 +124,11 @@ class CoExBO(HumanFeedback):
         - hallucinate: bool, whether or not we condition the GP on the normal BO query point.
         - adversarial: bool, (for test). If true, our selection will be reversed.
         """
-        HumanFeedback.__init__(self, feature_names)
+        HumanFeedback.__init__(self, feature_names, n_suggestions)
         self.domain = domain
         self.true_function = true_function
         self.noisy = noisy
-        self.duel = DuelFeedback(domain, true_function, noisy=noisy)
+        self.duel = DuelFeedback(domain, true_function, n_suggestions = n_suggestions, noisy=noisy)
         self.training_iter = training_iter
         self.n_restarts = n_restarts
         self.raw_samples = raw_samples
@@ -64,9 +138,90 @@ class CoExBO(HumanFeedback):
         self.hallucinate = hallucinate
         self.acqf_method = acqf_method
         self.adversarial = adversarial
-        self.meta = meta
+        self.n_suggestions = n_suggestions
+        self.chosen_acf = chosen_acf
         
-    def query_to_human(self, X_pairwise, X=None, Y=None, model=None, prior_pref=None, beta=None, explanation=True):
+    
+
+        
+        
+    
+    
+        
+    def fix_y_pairwise(self, X_n_wise, feedback_sure, feedback_unsure ):
+        
+        y_pairwise_ = [] 
+        y_pairwise_unsure_ = []
+        if self.n_suggestions == 2 :
+            y_pairwise_next = self.tensor(1 - feedback_sure).unsqueeze(0)
+            y_pairwise_unsure_next = self.tensor(feedback_unsure).unsqueeze(0)
+            return y_pairwise_next, y_pairwise_unsure_next
+        
+         
+        y_pairwise = torch.tensor([], dtype=torch.int8,  device=X_n_wise.device)
+        y_pairwise_unsure = torch.tensor([], dtype=torch.int8,  device=X_n_wise.device)
+        X_pairwise = convert_to_pair(X_n_wise, self.n_suggestions)
+        X_pairwise = X_pairwise[:self.n_suggestions-1]
+        for i in range(self.n_suggestions-1):
+            y_pairwise = torch.cat((y_pairwise,self.tensor(1 if feedback_sure == 0  else 0 ).unsqueeze(0)))
+            y_pairwise_unsure = torch.cat((y_pairwise_unsure,self.tensor(1 if feedback_sure == 0 else feedback_unsure ).unsqueeze(0)))
+        return y_pairwise, y_pairwise_unsure
+                
+                
+            
+            
+            
+        
+        
+        
+        
+        
+        
+        
+        
+        
+    def query_to_human(self, X_n_wise, X=None, Y=None, model=None, prior_pref=None, beta=None, explanation=True):
+        """
+        Querying to human which candidates are preferred.
+        
+        Args:
+        - X_pairwise: torch.tensor, a pairwise candidate
+        - X: torch.tensor, the observed inputs
+        - Y: torch.tensor, the observed outputs
+        - model: botorch.models.gp_regression.SingleTaskGP, BoTorch SingleTaskGP.
+        - prior_pref: CoExBO._monte_carlo_quadrature.MonteCarloQuadrature, soft-Copleland score function (human preference).
+        - beta: float, optimization hyperparameter of GP-UCB, UCB := mu(x) + beta * stddev(x)
+        - explanation: bool, whether or not we need the explanation feature.
+        
+        Return:
+        - y_pairwise: torch.tensor, human selection results.
+        - y_pairwise_unsure: torch.tensor, 1 if unsure, otherwise 0.
+        """
+        n_dims = int(X_n_wise.shape[1] / self.n_suggestions)
+        if len(X_n_wise) == 1:
+            # This triggers the case where we are running Human-in-the-loop experiments.
+            self.display_n_samples(X_n_wise)
+            if explanation:
+                self.explanation_flow(X_n_wise.reshape(self.n_suggestions, n_dims), X, Y, model, prior_pref, beta)
+            y_pairwise, y_pairwise_unsure, chosen_point = self.get_human_feedback_n()
+            y_pairwise, y_pairwise_unsure = self.fix_y_pairwise(X_n_wise, y_pairwise, y_pairwise_unsure)
+        else:
+            # This triggers the case where we are running the initial experiments.
+            # We will ask human to collect the initial preference over random points.
+            y_pairwise = []
+            y_pairwise_unsure = []
+            for epoch, X_n_wise_next in enumerate(X_n_wise):
+                print("Epoch: "+str(epoch+1)+"/"+str(len(X_n_wise_next)))
+                self.display_n_samples(X_n_wise_next.unsqueeze(0), random=True)
+                y_pairwise_next, y_pairwise_unsure_next, chosen_point = self.get_human_feedback_n(rand=True)
+                y_pairwise_next, y_pairwise_unsure_next = self.fix_y_pairwise(X_n_wise, y_pairwise_next, y_pairwise_unsure_next)
+                y_pairwise.append(y_pairwise_next)
+                y_pairwise_unsure.append(y_pairwise_unsure_next)
+            y_pairwise = torch.cat(y_pairwise)
+            y_pairwise_unsure = torch.cat(y_pairwise_unsure)
+        return y_pairwise.long(), y_pairwise_unsure.long(), chosen_point
+        
+    def query_to_human_(self, X_pairwise, X=None, Y=None, model=None, prior_pref=None, beta=None, explanation=True):
         """
         Querying to human which candidates are preferred.
         
@@ -118,10 +273,8 @@ class CoExBO(HumanFeedback):
         - dataset_duel: list, list of initial samples for human preference.
         """
         X = self.domain.sample(n_init_obj)
-
         if self.noisy:
             Y, Y_true = self.true_function(X.squeeze())
-            
         else:
             Y = self.true_function(X.squeeze())
         
@@ -157,7 +310,30 @@ class CoExBO(HumanFeedback):
             training_iter=self.training_iter,
         )
         prior_pref = MonteCarloQuadrature(model_pref, self.domain, n_mc=self.n_mc_quadrature)
+        # prior_pref = self.initialize_pref_gp_pairwise_model(X_pairwise, y_pairwise)
         return model, prior_pref
+    
+    def initialize_pref_gp_pairwise_model(self, X_pairwise, y_pairwise): # Sahand PairwiseGP botorch
+        num_of_pairs = len(X_pairwise)
+        num_points = num_of_pairs * 2
+        dim = X_pairwise.shape[1] // 2
+        train_x = torch.tensor([], dtype=X_pairwise.dtype,  device=X_pairwise.device)   
+        train_x = torch.cat((train_x,X_pairwise[:,0:dim]))
+        train_x = torch.cat((train_x,X_pairwise[:,dim:]))
+        compr_y =  torch.tensor([], dtype=y_pairwise.dtype,  device=y_pairwise.device)   
+        for i in range(num_of_pairs) :
+            if y_pairwise[i].item() == 1 : 
+                y = torch.tensor([i,num_of_pairs+i], dtype=y_pairwise.dtype,  device=y_pairwise.device)
+                
+            else :
+                y = torch.tensor([num_of_pairs+i,i], dtype=y_pairwise.dtype,  device=y_pairwise.device)
+            compr_y = torch.cat((compr_y, y.unsqueeze(dim=0)))
+        
+        model = PairwiseGP(train_x, compr_y)
+        model.to(train_x)
+        mll = PairwiseLaplaceMarginalLogLikelihood(model.likelihood, model)
+        fit_gpytorch_model(mll)
+        return model
     
     def generate_pairwise_candidates(self, model, beta, prior_pref=None, gamma=None):
         """
@@ -184,7 +360,9 @@ class CoExBO(HumanFeedback):
                 hallucinate=self.hallucinate,
                 n_restarts=self.n_restarts,
                 raw_samples=self.raw_samples,
-                meta=self.meta,
+                domain = self.domain,
+                n_suggestions=self.n_suggestions,
+                chosen_acf=self.chosen_acf ,
             )
         else:
             # (For ablation study) does not include the uncertainty on expert preference elicitation
@@ -199,7 +377,7 @@ class CoExBO(HumanFeedback):
                 raw_samples=self.raw_samples,
             )
         
-        X_pairwise_next = acqf()
+        X_pairwise_next,_ = acqf()
         dist = (X_pairwise_next[:,0] - X_pairwise_next[:,1]).pow(2).sqrt().item()
         return X_pairwise_next, dist
     
@@ -222,9 +400,41 @@ class CoExBO(HumanFeedback):
         - y_pairwise_next: torch.tensor, the observed preference result (sure)
         - y_pairwise_unsure_next: torch.tensor, the observed preference result (unsure)
         """
-        y_pairwise_next, y_pairwise_unsure_next = self.query_to_human(X_pairwise_next, X, Y, model, prior_pref, beta, explanation=self.explanation)
-        X_next = torch.chunk(X_pairwise_next, dim=1, chunks=2)[1 - y_pairwise_next]
+        y_pairwise_next, y_pairwise_unsure_next, chosen_point = self.query_to_human(X_pairwise_next, X, Y, model, prior_pref, beta, explanation=self.explanation)
         
+        # this if part can be removed if the below part is working
+        if self.n_suggestions == 2:
+            X_next = torch.chunk(X_pairwise_next, dim=1, chunks=2)[1 - y_pairwise_next]
+            
+            if self.noisy:
+                Y_next, Y_true_next = self.true_function(X_next)
+                return X_next, Y_next, Y_true_next, y_pairwise_next, y_pairwise_unsure_next
+            else:
+                Y_next = self.true_function(X_next)
+                return X_next, Y_next, y_pairwise_next, y_pairwise_unsure_next
+        
+        
+        # this if part working for  n_suggestions >=2 then remove the above if part
+        X_pairwise = convert_to_pair(X_pairwise_next, self.n_suggestions)
+        X_pairwise = X_pairwise[:self.n_suggestions-1]
+        n_dim = self.domain.bounds.shape[1]
+        if chosen_point == 1: 
+            X_next = X_pairwise[0,0:n_dim].unsqueeze(0)
+            y_pairwise_next_ = torch.tensor(1, device=y_pairwise_next.device).unsqueeze(0)
+            y_pairwise_unsure_next_ = torch.tensor(1, device=y_pairwise_unsure_next.device).unsqueeze(0)
+        elif chosen_point == self.n_suggestions+1:   # chosen unsure randomly choose any of BO suggestions (self.n_suggestions-1 options)
+            random_number = torch.randint(1, self.n_suggestions, (1,))
+            start_idx = random_number*self.domain.bounds.shape[1]
+            X_next = X_pairwise_next[0,start_idx: start_idx + n_dim].unsqueeze(0)
+            y_pairwise_next_ = torch.tensor(0, device=y_pairwise_next.device).unsqueeze(0)
+            y_pairwise_unsure_next_ = torch.tensor(0, device=y_pairwise_next.device).unsqueeze(0)
+        else:
+            start_index = (chosen_point-1)*n_dim
+            end_index = start_index+n_dim
+            X_next =  X_pairwise_next[0,start_index:end_index].unsqueeze(0)
+            y_pairwise_next_ = torch.tensor(0, device=y_pairwise_next.device).unsqueeze(0)
+            y_pairwise_unsure_next_ = torch.tensor(1, device=y_pairwise_next.device).unsqueeze(0)
+            
         if self.noisy:
             Y_next, Y_true_next = self.true_function(X_next)
             return X_next, Y_next, Y_true_next, y_pairwise_next, y_pairwise_unsure_next
@@ -290,7 +500,7 @@ class CoExBO(HumanFeedback):
                 functions.append(f)
             return torch.vstack(functions).T
     
-    def compute_probability_of_improvement(self, model, X_pairwise):
+    def compute_probability_of_improvement_n(self, model, X_n_wise):
         """
         Compute the probability of improvement. See Eqs.(89)-(90)
         
@@ -302,6 +512,35 @@ class CoExBO(HumanFeedback):
         - pi: torch.tensor, the mean of the probability of improvement.
         - pi_std: torch.tensor, the standard deviation of the probability of improvement.
         """
+        X_pairwise = convert_to_pair(X_n_wise, self.n_suggestions)
+        X_pairwise = X_pairwise[:self.n_suggestions-1]
+         
+        pis= torch.tensor([], dtype=X_pairwise.dtype,  device=X_pairwise.device)  
+        pi_stds = torch.tensor([], dtype=X_pairwise.dtype,  device=X_pairwise.device)  
+        for i in range(self.n_suggestions-1):
+            u, u_prime = torch.chunk(X_pairwise[i].unsqueeze(dim=0), dim=1, chunks=2)
+            f0 = self.safe_sampling(model, u)
+            f1 = self.safe_sampling(model, u_prime)
+            functions = f0 - f1
+            pi_f = D.Normal(0,1).cdf(functions.squeeze() / model.likelihood.noise.sqrt()).detach()
+            pi = pi_f.mean(axis=0)
+            pi_std = pi_f.std(axis=0)
+            pis = torch.cat((pis, pi.unsqueeze(0)))
+            pi_stds = torch.cat((pi_stds, pi_std.unsqueeze(0)))
+        return pis, pi_stds
+    
+    def compute_probability_of_improvement(self, model, X_pairwise):
+        """
+        Compute the probability of improvement. See Eqs.(89)-(90)
+        
+        Args:
+        - model: botorch.models.gp_regression.SingleTaskGP, BoTorch SingleTaskGP.
+        - X_pairwise: torch.tensor, a pairwise candidate to investigate.
+        
+        Return:
+        - pi: torch.tensor, the mean of the probability of improvement.
+        - pi_std: torch.tensor, the standard deviation of the probability of improvement.
+        """   
         u, u_prime = torch.chunk(X_pairwise, dim=1, chunks=2)
         f0 = self.safe_sampling(model, u)
         f1 = self.safe_sampling(model, u_prime)
@@ -334,11 +573,17 @@ class CoExBO(HumanFeedback):
         model = set_and_fit_rbf_model(X, Y)
         
         # estimate this time answer correctness
+        X_pairwise_next = convert_to_pair(X_pairwise_next, self.n_suggestions) #Sahand
+        X_pairwise_next = X_pairwise_next[:self.n_suggestions-1]
         pi_mean, pi_std = self.compute_probability_of_improvement(model, X_pairwise_next)
-        if y_pairwise_next == 0:
-            pi_mean = 1 - pi_mean
-        if self.explanation:
-            print(f"Probability of correct selection: {pi_mean.item():.2e} ± {pi_std.item():.2e}")
+        if pi_mean.ndim == 0 :
+            pi_mean = pi_mean.unsqueeze(0)
+            pi_std = pi_std.unsqueeze(0)
+        for i in range(self.n_suggestions-1): # Sahand
+            if y_pairwise_next[i] == 0:
+                pi_mean[i] = 1 - pi_mean[i]
+            if self.explanation:
+                print(f"Probability of correct selection: {pi_mean[i].item():.2e} ± {pi_std[i].item():.2e}")
         
         # estimate total answer correctness
         X_sure = X_pairwise[y_pairwise_unsure.bool()]
@@ -348,9 +593,9 @@ class CoExBO(HumanFeedback):
         total_pi_std = pi_std.mean()
         if self.explanation:
             print(f"Estimated total correct selection rate amongst sure samples: {total_pi_mean.item():.2e} ± {total_pi_std.item():.2e}")
-        return pi_mean.item(), total_pi_mean.item()
+        return pi_mean.mean().item() if self.n_suggestions > 2 else pi_mean.item(), total_pi_mean.item()  #Sahand changed from pi_mean.item() to  pi_mean.mean().item()
     
-    def __call__(self, dataset_obj, dataset_duel, beta, gamma, model_TPN = None, lower_limit=0, upper_limit=1):
+    def __call__(self, dataset_obj, dataset_duel, beta, gamma):
         """
         Run CoExBO.
         Flow:
@@ -384,15 +629,8 @@ class CoExBO(HumanFeedback):
         # 1. CoExBO loop
         print("training models...")
         model, prior_pref = self.set_models(X, Y, X_pairwise, y_pairwise)
-        
-        if model_TPN:
-            model = model_TPN
-            model.train_X = X
-            model.train_targets = Y
-            model.upper_limit = upper_limit
-            model.lower_limit = lower_limit
         print("generating candidates...")
-        X_pairwise_next, dist = self.generate_pairwise_candidates(
+        X_pairwise_next,  dist = self.generate_pairwise_candidates(
             model,
             beta,
             prior_pref,
@@ -427,11 +665,11 @@ class CoExBO(HumanFeedback):
         judge_correctness = self.duel.evaluate_correct_answer_rate(X_pairwise_next, y_pairwise_next)
         if self.explanation:
             print(f"Is your selection correct? Yes if 1: {judge_correctness}")
-            print(f"Is your selection sure? Yes if 1: {y_pairwise_unsure_next.item()}")        
-        results = [overhead, best_obs, dist, judge_correctness, y_pairwise_unsure_next.item()]
+            for i in range(self.n_suggestions -1):
+                print(f"Is your selection sure? Yes if 1: {y_pairwise_unsure_next[i].item()}")        
+        results = [overhead, best_obs, dist, judge_correctness, y_pairwise_unsure_next] #Sahand y_pairwise_unsure_next.item() changed to y_pairwise_unsure_next to support more than 2 suggestions
         return results, dataset_obj, dataset_duel
-    
-    
+
 
 class CoExBOwithSimulation:
     def __init__(
@@ -439,6 +677,8 @@ class CoExBOwithSimulation:
         domain, 
         true_function, 
         sigma=0,
+        n_suggestions=2,
+        chosen_acf=["qMES"],  
         training_iter=200,
         n_mc_quadrature=100,
         n_restarts=10,
@@ -447,8 +687,7 @@ class CoExBOwithSimulation:
         probabilistic_pi=True,
         hallucinate=True,
         adversarial=False,
-        noisy=False,
-        meta=False
+
     ):
         """
         CoExBO main instance specialised for synthetic human response.
@@ -469,7 +708,8 @@ class CoExBOwithSimulation:
         """
         self.domain = domain
         self.true_function = true_function
-        self.duel = DuelFeedback(domain, true_function, noisy)
+        self.n_suggestions = n_suggestions
+        self.duel = DuelFeedback(domain, true_function, n_suggestions)
         self.sigma = sigma                                # noise level of synthetic human feedback
         self.training_iter = training_iter
         self.n_restarts = n_restarts
@@ -480,9 +720,9 @@ class CoExBOwithSimulation:
         self.hallucinate = hallucinate
         self.acqf_method = acqf_method
         self.adversarial = adversarial
-        self.meta = meta
+        self.chosen_acf = chosen_acf
         
-    def initial_sampling(self, n_init_obj, n_init_pref, X = []):
+    def initial_sampling(self, n_init_obj, n_init_pref):
         """
         Initial sampling.
         
@@ -494,9 +734,8 @@ class CoExBOwithSimulation:
         - dataset_obj: list, list of initial samples for objective function.
         - dataset_duel: list, list of initial samples for human preference.
         """
-        if len(X) == 0:
-            X = self.domain.sample(n_init_obj)
-        Y = self.true_function(X.squeeze(), loop=True)
+        X = self.domain.sample(n_init_obj)
+        Y = self.true_function(X.squeeze())
         dataset_obj = (X, Y)
         self.duel.initialise_variance(dataset_obj)
         
@@ -506,39 +745,33 @@ class CoExBOwithSimulation:
         dataset_duel = (X_pairwise, y_pairwise, y_pairwise_unsure)
         return dataset_obj, dataset_duel
     
-    
-    def random_forest_pref_mode(self, X_pairwise, y_pairwise):
-        return None
-        # clf = RandomForestClassifier()
-        # y_train=1 - y_pairwise
-        # # Train the classifier
-        # clf.fit(X_pairwise, y_train)
 
-        
-        # return clf
+    
 
     
     def initialize_pref_gp_pairwise_model(self, X_pairwise, y_pairwise):
-        num_of_pairs = len(X_pairwise)
-        num_points = num_of_pairs * 2
-        dim = X_pairwise.shape[1] // 2
-        train_x = torch.tensor([], dtype=X_pairwise.dtype,  device=X_pairwise.device)   
-        train_x = torch.cat((train_x,X_pairwise[:,0:dim]))
-        train_x = torch.cat((train_x,X_pairwise[:,dim:]))
-        compr_y =  torch.tensor([], dtype=y_pairwise.dtype,  device=y_pairwise.device)   
-        for i in range(num_of_pairs) :
-            if y_pairwise[i].item() == 1 : 
-                y = torch.tensor([i,num_of_pairs+i], dtype=y_pairwise.dtype,  device=y_pairwise.device)
+        return None
+        # num_of_pairs = len(X_pairwise)
+        # num_points = num_of_pairs * 2
+        # dim = X_pairwise.shape[1] // 2
+        # train_x = torch.tensor([], dtype=X_pairwise.dtype,  device=X_pairwise.device)   
+        # train_x = torch.cat((train_x,X_pairwise[:,0:dim]))
+        # train_x = torch.cat((train_x,X_pairwise[:,dim:]))
+        # compr_y =  torch.tensor([], dtype=y_pairwise.dtype,  device=y_pairwise.device)   
+        # for i in range(num_of_pairs) :
+        #     if y_pairwise[i].item() == 1 : 
+        #         y = torch.tensor([i,num_of_pairs+i], dtype=y_pairwise.dtype,  device=y_pairwise.device)
                 
-            else :
-                y = torch.tensor([num_of_pairs+i,i], dtype=y_pairwise.dtype,  device=y_pairwise.device)
-            compr_y = torch.cat((compr_y, y.unsqueeze(dim=0)))
+        #     else :
+        #         y = torch.tensor([num_of_pairs+i,i], dtype=y_pairwise.dtype,  device=y_pairwise.device)
+        #     compr_y = torch.cat((compr_y, y.unsqueeze(dim=0)))
         
-        model = PairwiseGP(train_x, compr_y)
-        model.to(train_x)
-        mll = PairwiseLaplaceMarginalLogLikelihood(model.likelihood, model)
-        fit_gpytorch_model(mll)
-        return model
+        # model = PairwiseGP(train_x, compr_y)
+        # model.to(train_x)
+        # mll = PairwiseLaplaceMarginalLogLikelihood(model.likelihood, model)
+        # fit_gpytorch_model(mll)
+        # return model
+    
     
     def set_models(self, X, Y, X_pairwise, y_pairwise):
         """
@@ -554,24 +787,23 @@ class CoExBOwithSimulation:
         - model: botorch.models.gp_regression.SingleTaskGP, BoTorch SingleTaskGP.
         - prior_pref: CoExBO._monte_carlo_quadrature.MonteCarloQuadrature, soft-Copleland score function (human preference).
         """
-        X = X.float()
         model = set_and_fit_rbf_model(X, Y)
         if self.learn_preference:
             # CoExBO acquisition function is to learn human preference.
-            #pref_pairwise = self.initialize_pref_gp_pairwise_model(X_pairwise, y_pairwise)
-            #rf_clf = self.random_forest_pref_mode(X_pairwise,y_pairwise)
+            pref_pairwise = self.initialize_pref_gp_pairwise_model(X_pairwise, y_pairwise)
+            xgboost_model = xgboost_pref_model(X_pairwise, y_pairwise)
             model_pref = set_and_train_classifier(
                 X_pairwise, 
                 y_pairwise, 
                 training_iter=self.training_iter,
             )
             prior_pref = MonteCarloQuadrature(model_pref, self.domain, n_mc=self.n_mc_quadrature)
-            return model, prior_pref, None, None
+            return model, prior_pref, pref_pairwise, xgboost_model
         else:
             # The other benchmarking acquisition function is not to learn human preference.
             return model
     
-    def generate_pairwise_candidates(self, model, beta, prior_pref=None, gamma=None, pref_pairwise=None, rf_clf=None):
+    def generate_pairwise_candidates(self, model, beta, prior_pref=None, pref_pairwise=None, xgboost_model=None, gamma=None):
         """
         Generate a pairwise candidate for the next query.
         
@@ -598,9 +830,12 @@ class CoExBOwithSimulation:
                     hallucinate=self.hallucinate,
                     n_restarts=self.n_restarts,
                     raw_samples=self.raw_samples,
-                    meta=self.meta,
-                    pref_pairwise = pref_pairwise,
-                    rf_clf = rf_clf
+                    domain = self.domain,
+                    n_suggestions=self.n_suggestions,
+                    chosen_acf=self.chosen_acf ,
+                    pref_pairwise= pref_pairwise,
+                    xgboost_model = xgboost_model
+                    
                 )
             else:
                 # (For ablation study) does not include the uncertainty on expert preference elicitation
@@ -626,11 +861,17 @@ class CoExBOwithSimulation:
                 raw_samples=self.raw_samples,
             )
         
-        X_pairwise_next = acqf()
+        X_pairwise_next, acf_vals_suggest = acqf()
         dist = (X_pairwise_next[:,0] - X_pairwise_next[:,1]).pow(2).item()
-        return X_pairwise_next, dist
+        return X_pairwise_next, acf_vals_suggest,  dist
     
-    def query(self, X_pairwise_next):
+
+         
+         
+         
+         
+    
+    def query(self, X_pairwise_next, acf_vals_suggest = None):
         """
         Querying to both synthetic human response and true function.
         
@@ -643,15 +884,45 @@ class CoExBOwithSimulation:
         - y_pairwise_next: torch.tensor, the observed preference result (sure)
         - y_pairwise_unsure_next: torch.tensor, the observed preference result (unsure)
         """
-        y_pairwise_next, y_pairwise_unsure_next = self.duel.feedback(X_pairwise_next, sigma=self.sigma, in_loop=True)
-
+        
+        if self.n_suggestions == 2 :
+            y_pairwise_next, y_pairwise_unsure_next = self.duel.feedback(X_pairwise_next, sigma=self.sigma, in_loop=True)
+            if self.adversarial:
+                y_pairwise_next = 1 - y_pairwise_next
+            X_next = torch.chunk(X_pairwise_next, dim=1, chunks=2)[1 - y_pairwise_next]
+            Y_next = self.true_function(X_next)
+            return X_next, Y_next, X_pairwise_next, y_pairwise_next, y_pairwise_unsure_next
+            
+            
+            
+        X_pairwise_, _, _ = self.duel.n_feedback(X_pairwise_next, sigma=self.sigma, in_loop=True)
+        X_pairwise_ = X_pairwise_[:self.n_suggestions-1] # only care about preference data point acf vs other data points recommended by normal acf
+        y_pairwise_next, y_pairwise_unsure_next = self.duel.feedback(X_pairwise_, sigma=self.sigma, in_loop=True)
+        all_pref = True
+        n_dim = self.domain.bounds.shape[1]
+        for i in range(len(X_pairwise_)):
+            if y_pairwise_next[i] == 0 :
+                all_pref = False
+                break
+        if all_pref == True :
+            X_next = X_pairwise_[0,0:n_dim].unsqueeze(0)
+            y_pairwise_next_ = torch.tensor(1, device=y_pairwise_next.device).unsqueeze(0)
+            y_pairwise_unsure_next_ = torch.tensor(1, device=y_pairwise_unsure_next.device).unsqueeze(0)
+        else:
+            random_number = torch.randint(1, self.n_suggestions, (1,))
+            start_idx = random_number*self.domain.bounds.shape[1]
+            X_next = X_pairwise_next[0,start_idx: start_idx + n_dim].unsqueeze(0)
+            y_pairwise_next_ = torch.tensor(0, device=y_pairwise_next.device).unsqueeze(0)
+            y_pairwise_unsure_next_ = torch.tensor(0, device=y_pairwise_next.device).unsqueeze(0)
+           
+              
+            
+            
         if self.adversarial:
             y_pairwise_next = 1 - y_pairwise_next
-        X_next = torch.chunk(X_pairwise_next, dim=1, chunks=2)[1 - y_pairwise_next]
+        # X_next = torch.chunk(X_pairwise_next, dim=1, chunks=2)[1 - y_pairwise_next]
         Y_next = self.true_function(X_next)
-        Y_0 = self.true_function(torch.chunk(X_pairwise_next, dim=1, chunks=2)[0]) #PREFERENCE + METABO
-        Y_1 = self.true_function(torch.chunk(X_pairwise_next, dim=1, chunks=2)[1]) #META BO
-        return X_next, Y_next, y_pairwise_next, y_pairwise_unsure_next, [Y_0, Y_1]
+        return X_next, Y_next, X_pairwise_,  y_pairwise_next, y_pairwise_unsure_next   #y_pairwise_next_, y_pairwise_unsure_next_
     
     def update_datasets(self, dataset_obj, dataset_duel, dataset_obj_new, dataset_duel_new):
         """
@@ -669,13 +940,14 @@ class CoExBOwithSimulation:
         """
         X, Y = dataset_obj
         X_next, Y_next = dataset_obj_new
+        
         X = torch.cat((X, X_next), dim=0)
         Y = torch.cat((Y, Y_next), dim=0)
         dataset_obj = (X, Y)
         dataset_duel = self.duel.update_and_augment_data(dataset_duel, dataset_duel_new)
         return dataset_obj, dataset_duel
     
-    def __call__(self, dataset_obj, dataset_duel, beta, gamma, sigma=None, model_TPN = None, lower_limit=0, upper_limit=1):
+    def __call__(self, dataset_obj, dataset_duel, beta, gamma, sigma=None):
         """
         Run CoExBO.
         Flow:
@@ -703,25 +975,19 @@ class CoExBOwithSimulation:
             self.sigma = sigma
         X, Y = dataset_obj
         X_pairwise, y_pairwise, y_pairwise_unsure = dataset_duel
-
-        #print("y_pairwise: ", y_pairwise.mean())
         tic = time.monotonic()
         # 1. CoExBO loop
         if self.learn_preference:
-            model, prior_pref, pref_pairwise, p_clf = self.set_models(X, Y, X_pairwise, y_pairwise)
-            if model_TPN:
-                model = model_TPN
-                model.train_X = X
-                model.train_targets = Y
-                model.upper_limit = upper_limit
-                model.lower_limit = lower_limit
-            X_pairwise_next, dist = self.generate_pairwise_candidates(
+            model, prior_pref, pref_pairwise, xgboost_model = self.set_models(X, Y, X_pairwise, y_pairwise)
+            X_pairwise_next, acf_vals_suggest, dist = self.generate_pairwise_candidates(
                 model,  
                 beta,
                 prior_pref,
-                gamma,
                 pref_pairwise,
-                p_clf
+                xgboost_model,
+                gamma,
+    
+                
             )
         else:
             model = self.set_models(X, Y, X_pairwise, y_pairwise)
@@ -730,7 +996,7 @@ class CoExBOwithSimulation:
                 beta,
             )
             
-        X_next, Y_next, y_pairwise_next, y_pairwise_unsure_next,Y_returns = self.query(X_pairwise_next)
+        X_next, Y_next, X_pairwise_next , y_pairwise_next, y_pairwise_unsure_next = self.query(X_pairwise_next, acf_vals_suggest)
         tok = time.monotonic()
         overhead = tok - tic
         dataset_obj_new = (X_next, Y_next)
@@ -738,7 +1004,7 @@ class CoExBOwithSimulation:
         result = (overhead, dist)
         
         dataset_obj, dataset_duel, result = self.update_and_evaluate(result, dataset_obj, dataset_duel, dataset_obj_new, dataset_duel_new)
-        return result, dataset_obj, dataset_duel, Y_returns
+        return result, dataset_obj, dataset_duel
     
     def update_and_evaluate(self, result, dataset_obj, dataset_duel, dataset_obj_new, dataset_duel_new):
         """
@@ -805,7 +1071,7 @@ class StateManager(TensorManager):
         """
         beta = self.beta_init * self.n_dims * self.sqrt(2*(1 + t)).item()
         if self.probabilistic_pi:
-            gamma = self.gamma_init * (t**2)
+            gamma = self.gamma_init * ((t+1)**2)
         else:
             gamma = self.gamma_init / (t+1)
         print(f"{t}) parameters: beta {beta:.3e} gamma {gamma:.3e}")

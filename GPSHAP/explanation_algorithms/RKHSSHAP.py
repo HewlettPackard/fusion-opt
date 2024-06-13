@@ -67,8 +67,21 @@ class RKHSSHAP(object):
                                                        coalitions=self.coalitions,
                                                        regression_target=self.mean_stochastic_value_function_evaluations
                                                        ) * self.scale
-
+        
+    def sequential_compute(self, minus_first_coalitions):
+        conditional_means = []
+        for S in tqdm(minus_first_coalitions):
+            conditional_means.append(self.compute_conditional_mean_projections(S.bool()))
+        return torch.stack(conditional_means)
+    
     def _compute_conditional_mean_projections(self, X):
+        minus_first_coalitions = self.coalitions[1:]  # remove the first row of 0s.
+        conditional_means = []
+        for S in tqdm(minus_first_coalitions):
+            conditional_means.append(self._compute_conditional_mean_projection(S.bool(), X))
+        return torch.stack(conditional_means)
+
+    def _compute_conditional_mean_projections_(self, X):
 
         #  Compute the conditional mean projections using joblib parallelisation.
         minus_first_coalitions = self.coalitions[1:]  # remove the first row of 0s.
